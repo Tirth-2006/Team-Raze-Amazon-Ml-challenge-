@@ -185,17 +185,50 @@ def run(args):
     ensure_index_schema(connection)
     matching_path = args.output_dir / "matching_results.tsv"
     candidate_path = args.output_dir / "candidate_pairs.tsv"
+    processed = 0
+    file_mode = "w"
+    if args.resume:
+        if not matching_path.exists() or not candidate_path.exists():
+            raise RuntimeError("--resume requires both existing output files")
+        with matching_path.open("r", encoding="utf-8", newline="") as file:
+            matching_rows = list(csv.reader(file, delimiter="\t"))
+        with candidate_path.open("r", encoding="utf-8", newline="") as file:
+            candidate_rows = list(csv.reader(file, delimiter="\t"))
+        if not matching_rows or not candidate_rows:
+            raise RuntimeError("--resume requires non-empty output files")
+        if matching_rows[0] != ["source1_entity_id", "matched_entity_ids"]:
+            raise RuntimeError("Invalid matching output header")
+        if candidate_rows[0] != ["source1_entity_id", "candidate_entity_ids"]:
+            raise RuntimeError("Invalid candidate output header")
+        matching_count = len(matching_rows) - 1
+        candidate_count = len(candidate_rows) - 1
+        if matching_count != candidate_count:
+            raise RuntimeError("Output files contain different row counts")
+        if matching_rows[1:] and [row[0] for row in matching_rows[1:]] != [
+            row[0] for row in candidate_rows[1:]
+        ]:
+            raise RuntimeError("Output files contain different Source 1 IDs")
+        processed = matching_count
+        file_mode = "a"
     with (
-        matching_path.open("w", encoding="utf-8", newline="") as matching_file,
-        candidate_path.open("w", encoding="utf-8", newline="") as candidate_file,
+        matching_path.open(file_mode, encoding="utf-8", newline="") as matching_file,
+        candidate_path.open(file_mode, encoding="utf-8", newline="") as candidate_file,
     ):
         matching_writer = csv.writer(matching_file, delimiter="\t", lineterminator="\n")
         candidate_writer = csv.writer(candidate_file, delimiter="\t", lineterminator="\n")
-        matching_writer.writerow(["source1_entity_id", "matched_entity_ids"])
-        candidate_writer.writerow(["source1_entity_id", "candidate_entity_ids"])
+        if not args.resume:
+            matching_writer.writerow(["source1_entity_id", "matched_entity_ids"])
+            candidate_writer.writerow(["source1_entity_id", "candidate_entity_ids"])
         source1 = args.test_dir / "test_source1.tsv"
-        processed = 0
+        skipped = 0
         for chunk in pd.read_csv(source1, sep="\t", usecols=FIELDS, chunksize=args.s1_chunk_size):
+            if skipped < processed:
+                remaining = processed - skipped
+                if len(chunk) <= remaining:
+                    skipped += len(chunk)
+                    continue
+                chunk = chunk.iloc[remaining:].copy()
+                skipped = processed
             chunk_results = score_chunk(
                 connection, chunk, args.max_candidates,
                 args.name_threshold, args.address_threshold,
@@ -217,6 +250,7 @@ def main():
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_ROOT)
     parser.add_argument("--index", type=Path, default=OUTPUT_ROOT / "targets.sqlite")
     parser.add_argument("--rebuild-index", action="store_true")
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--target-chunk-size", type=int, default=25_000)
     parser.add_argument("--s1-chunk-size", type=int, default=1_000)
     parser.add_argument("--max-candidates", type=int, default=200)
