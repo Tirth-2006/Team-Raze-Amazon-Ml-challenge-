@@ -5,3 +5,5 @@ output/*.sqlite
 
 output/*.sqlite-*
 output/*.tsv
+logs/*.log
+logs/*.err
