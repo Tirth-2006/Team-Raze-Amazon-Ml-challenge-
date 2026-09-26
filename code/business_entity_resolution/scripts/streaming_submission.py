@@ -120,13 +120,6 @@ def score_chunk(connection, chunk, max_candidates, name_threshold, address_thres
         """SELECT s.entity_id, s.name_norm, s.addr_norm,
                   t.entity_id, t.name_norm, t.addr_norm
            FROM source_chunk AS s
-           JOIN targets AS t INDEXED BY idx_targets_name_first
-             ON t.country = s.country AND s.name_first <> ''
-            AND t.name_first = s.name_first
-           UNION ALL
-           SELECT s.entity_id, s.name_norm, s.addr_norm,
-                  t.entity_id, t.name_norm, t.addr_norm
-           FROM source_chunk AS s
            JOIN targets AS t INDEXED BY idx_targets_name_top3
              ON t.country = s.country AND s.name_top3 <> ''
             AND t.name_top3 = s.name_top3
