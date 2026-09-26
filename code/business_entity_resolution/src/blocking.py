@@ -75,7 +75,9 @@ def generate_candidates_multi_pass(
     s1_df: pd.DataFrame,
     s2_df: pd.DataFrame,
     s3_df: pd.DataFrame,
-    verbose: bool = True
+    verbose: bool = True,
+    target_chunk_size: int = 100_000,
+    max_candidates_per_entity: int = 5_000,
 ) -> Dict[str, Set[str]]:
     """
     Multi-pass blocking to generate candidates
@@ -88,154 +90,70 @@ def generate_candidates_multi_pass(
 
     Returns:
         Dict mapping S1 entity_id -> set of candidate S2/S3 entity_ids
+
+    ``target_chunk_size`` bounds the target-side scan. ``max_candidates_per_entity``
+    is a deterministic safety cap that prevents a common blocking key from
+    creating an unbounded Python set.
     """
     candidates = defaultdict(set)
-
-    # Combine S2 and S3 into single target pool
-    target_df = pd.concat([s2_df, s3_df], ignore_index=True)
-
-    if verbose:
-        print(f"Blocking: {len(s1_df):,} S1 entities vs {len(target_df):,} S2+S3 targets")
-
-    # PASS 1: Name prefix + country
-    if verbose:
-        print("\nPass 1: Name prefix (4 chars) + country")
-
-    s1_index = {}
-    for _, row in s1_df.iterrows():
-        key = (generate_blocking_key_name_prefix(row['business_name'], 4), row['country'])
-        if key not in s1_index:
-            s1_index[key] = []
-        s1_index[key].append(row['entity_id'])
-
-    target_index = {}
-    for _, row in target_df.iterrows():
-        key = (generate_blocking_key_name_prefix(row['business_name'], 4), row['country'])
-        if key not in target_index:
-            target_index[key] = []
-        target_index[key].append(row['entity_id'])
-
-    pass1_pairs = 0
-    for key in s1_index:
-        if key in target_index:
-            for s1_id in s1_index[key]:
-                candidates[s1_id].update(target_index[key])
-                pass1_pairs += len(target_index[key])
+    # Do not concatenate or index the target pool.  On the full data this can
+    # be tens of millions of rows and the old target-side dictionaries alone
+    # could exhaust the process before matching started.
+    target_frames = (s2_df, s3_df)
 
     if verbose:
-        print(f"  Generated {pass1_pairs:,} candidate pairs")
-        print(f"  {len(candidates):,} S1 entities have candidates so far")
+        print(
+            f"Blocking: {len(s1_df):,} S1 entities vs "
+            f"{sum(len(frame) for frame in target_frames):,} S2+S3 targets "
+            f"(target chunks of {target_chunk_size:,})"
+        )
 
-    # PASS 2: Name token overlap + country
-    if verbose:
-        print("\nPass 2: Name token overlap + country")
+    passes = (
+        ("Name prefix (4 chars)", lambda row: generate_blocking_key_name_prefix(row.business_name, 4)),
+        ("Name token overlap", lambda row: generate_blocking_key_name_tokens(row.business_name)),
+        ("Address numeric", lambda row: generate_blocking_key_address_numeric(row.business_address)),
+        ("Address token overlap", lambda row: generate_blocking_key_address_tokens(row.business_address)),
+    )
 
-    s1_tokens = {}
-    for _, row in s1_df.iterrows():
-        tokens = generate_blocking_key_name_tokens(row['business_name'])
-        country = row['country']
-        for token in tokens:
-            key = (token, country)
-            if key not in s1_tokens:
-                s1_tokens[key] = []
-            s1_tokens[key].append(row['entity_id'])
+    for pass_name, key_func in passes:
+        if verbose:
+            print(f"\nPass: {pass_name} + country")
+        s1_index = defaultdict(list)
+        for row in s1_df.itertuples(index=False):
+            keys = key_func(row)
+            if isinstance(keys, str):
+                keys = (keys,) if keys else ()
+            for key in keys:
+                if key:
+                    s1_index[(key, row.country)].append(row.entity_id)
 
-    target_tokens = {}
-    for _, row in target_df.iterrows():
-        tokens = generate_blocking_key_name_tokens(row['business_name'])
-        country = row['country']
-        for token in tokens:
-            key = (token, country)
-            if key not in target_tokens:
-                target_tokens[key] = []
-            target_tokens[key].append(row['entity_id'])
-
-    pass2_pairs = 0
-    for key in s1_tokens:
-        if key in target_tokens:
-            for s1_id in s1_tokens[key]:
-                new_candidates = set(target_tokens[key]) - candidates[s1_id]
-                candidates[s1_id].update(new_candidates)
-                pass2_pairs += len(new_candidates)
-
-    if verbose:
-        print(f"  Generated {pass2_pairs:,} NEW candidate pairs")
-        print(f"  {len(candidates):,} S1 entities have candidates so far")
-
-    # PASS 3: Address numeric + country
-    if verbose:
-        print("\nPass 3: Address numeric (first number) + country")
-
-    s1_addr_num = {}
-    for _, row in s1_df.iterrows():
-        num = generate_blocking_key_address_numeric(row['business_address'])
-        if num:
-            key = (num, row['country'])
-            if key not in s1_addr_num:
-                s1_addr_num[key] = []
-            s1_addr_num[key].append(row['entity_id'])
-
-    target_addr_num = {}
-    for _, row in target_df.iterrows():
-        num = generate_blocking_key_address_numeric(row['business_address'])
-        if num:
-            key = (num, row['country'])
-            if key not in target_addr_num:
-                target_addr_num[key] = []
-            target_addr_num[key].append(row['entity_id'])
-
-    pass3_pairs = 0
-    for key in s1_addr_num:
-        if key in target_addr_num:
-            for s1_id in s1_addr_num[key]:
-                new_candidates = set(target_addr_num[key]) - candidates[s1_id]
-                candidates[s1_id].update(new_candidates)
-                pass3_pairs += len(new_candidates)
-
-    if verbose:
-        print(f"  Generated {pass3_pairs:,} NEW candidate pairs")
-        print(f"  {len(candidates):,} S1 entities have candidates so far")
-
-    # PASS 4: Address token overlap + country
-    if verbose:
-        print("\nPass 4: Address token overlap + country")
-
-    s1_addr_tokens = {}
-    for _, row in s1_df.iterrows():
-        tokens = generate_blocking_key_address_tokens(row['business_address'])
-        country = row['country']
-        for token in tokens:
-            key = (token, country)
-            if key not in s1_addr_tokens:
-                s1_addr_tokens[key] = []
-            s1_addr_tokens[key].append(row['entity_id'])
-
-    target_addr_tokens = {}
-    for _, row in target_df.iterrows():
-        tokens = generate_blocking_key_address_tokens(row['business_address'])
-        country = row['country']
-        for token in tokens:
-            key = (token, country)
-            if key not in target_addr_tokens:
-                target_addr_tokens[key] = []
-            target_addr_tokens[key].append(row['entity_id'])
-
-    pass4_pairs = 0
-    for key in s1_addr_tokens:
-        if key in target_addr_tokens:
-            for s1_id in s1_addr_tokens[key]:
-                new_candidates = set(target_addr_tokens[key]) - candidates[s1_id]
-                candidates[s1_id].update(new_candidates)
-                pass4_pairs += len(target_addr_tokens[key])
-
-    if verbose:
-        print(f"  Generated {pass4_pairs:,} NEW candidate pairs")
-        print(f"  {len(candidates):,} S1 entities have candidates so far")
+        added = 0
+        for frame in target_frames:
+            for start in range(0, len(frame), target_chunk_size):
+                # Only this slice is traversed; no target-side inverted index
+                # and no S2+S3 concatenation are retained.
+                chunk = frame.iloc[start:start + target_chunk_size]
+                for row in chunk.itertuples(index=False):
+                    keys = key_func(row)
+                    if isinstance(keys, str):
+                        keys = (keys,) if keys else ()
+                    for key in keys:
+                        if not key:
+                            continue
+                        for s1_id in s1_index.get((key, row.country), ()):
+                            bucket = candidates[s1_id]
+                            if row.entity_id not in bucket and (
+                                max_candidates_per_entity is None
+                                or len(bucket) < max_candidates_per_entity
+                            ):
+                                bucket.add(row.entity_id)
+                                added += 1
+        if verbose:
+            print(f"  Added {added:,} candidate pairs; {len(candidates):,} S1 entities have candidates")
 
     # Ensure every S1 entity has an entry (even if empty)
-    for _, row in s1_df.iterrows():
-        if row['entity_id'] not in candidates:
-            candidates[row['entity_id']] = set()
+    for entity_id in s1_df['entity_id']:
+        candidates.setdefault(entity_id, set())
 
     # Summary statistics
     if verbose:

@@ -9,6 +9,7 @@ import xgboost as xgb
 import pickle
 import os
 import sys
+import random
 from collections import defaultdict
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
@@ -17,15 +18,17 @@ from normalization import normalize_business_name, normalize_address
 from blocking import generate_candidates_multi_pass
 from features import build_feature_matrix, compute_pairwise_features
 from scorer import macro_f05
+from paths import DATASET_ROOT, MODEL_ROOT
 
 
-def load_data(base_path='../../../student_resource/dataset'):
+def load_data(base_path=DATASET_ROOT):
     """Load training data"""
     print("Loading training data...")
-    train_s1 = pd.read_csv(f'{base_path}/train/train_source1.tsv', sep='\t')
-    train_s2 = pd.read_csv(f'{base_path}/train/train_source2.tsv', sep='\t')
-    train_s3 = pd.read_csv(f'{base_path}/train/train_source3.tsv', sep='\t')
-    train_gt = pd.read_csv(f'{base_path}/train/train_ground_truth.tsv', sep='\t')
+    base_path = os.fspath(base_path)
+    train_s1 = pd.read_csv(os.path.join(base_path, 'train', 'train_source1.tsv'), sep='\t')
+    train_s2 = pd.read_csv(os.path.join(base_path, 'train', 'train_source2.tsv'), sep='\t')
+    train_s3 = pd.read_csv(os.path.join(base_path, 'train', 'train_source3.tsv'), sep='\t')
+    train_gt = pd.read_csv(os.path.join(base_path, 'train', 'train_ground_truth.tsv'), sep='\t')
     print(f"Loaded: S1={len(train_s1):,}, S2={len(train_s2):,}, S3={len(train_s3):,}, GT={len(train_gt):,}")
     return train_s1, train_s2, train_s3, train_gt
 
@@ -63,9 +66,12 @@ def entity_level_split(s1_df, test_size=0.2, random_state=42):
 
 
 def generate_training_pairs(s1_ids, candidates, gt_dict, max_neg_ratio=3):
-    """Generate labeled pairs with negative sampling"""
+    """Generate labeled pairs while reservoir-sampling negatives.
+
+    Candidate sets are bounded by the blocker, but can still be large enough
+    that retaining every negative pair briefly doubles peak memory.
+    """
     pos_pairs = []
-    neg_pairs = []
 
     for s1_id in s1_ids:
         if s1_id not in gt_dict:
@@ -76,15 +82,28 @@ def generate_training_pairs(s1_ids, candidates, gt_dict, max_neg_ratio=3):
         for target_id in candidate_set:
             if target_id in true_matches:
                 pos_pairs.append((s1_id, target_id))
-            else:
-                neg_pairs.append((s1_id, target_id))
 
-    # Sample negatives
-    if len(neg_pairs) > len(pos_pairs) * max_neg_ratio:
-        print(f"  Sampling negatives: {len(pos_pairs) * max_neg_ratio:,} from {len(neg_pairs):,}")
-        np.random.seed(42)
-        neg_indices = np.random.choice(len(neg_pairs), size=len(pos_pairs) * max_neg_ratio, replace=False)
-        neg_pairs = [neg_pairs[i] for i in neg_indices]
+    # Reservoir sample negatives in a second pass, without a giant temporary
+    # list or NumPy index array.
+    negative_limit = len(pos_pairs) * max_neg_ratio
+    neg_pairs = []
+    seen_negatives = 0
+    rng = random.Random(42)
+    for s1_id in s1_ids:
+        true_matches = gt_dict.get(s1_id)
+        if true_matches is None:
+            continue
+        for target_id in candidates.get(s1_id, set()):
+            if target_id in true_matches:
+                continue
+            seen_negatives += 1
+            if len(neg_pairs) < negative_limit:
+                neg_pairs.append((s1_id, target_id))
+            elif negative_limit and rng.randrange(seen_negatives) < negative_limit:
+                neg_pairs[rng.randrange(negative_limit)] = (s1_id, target_id)
+
+    if seen_negatives > negative_limit:
+        print(f"  Sampling negatives: {negative_limit:,} from {seen_negatives:,}")
 
     return pos_pairs, neg_pairs
 
@@ -117,8 +136,6 @@ def main():
 
     # Load full data
     train_s1_full, train_s2, train_s3, train_gt_full = load_data()
-    gt_dict_full = parse_ground_truth(train_gt_full)
-
     # Sample 10% for faster training
     train_s1, train_gt = sample_training_data(train_s1_full, train_gt_full, sample_fraction=0.1)
     gt_dict = parse_ground_truth(train_gt)
@@ -128,14 +145,14 @@ def main():
     train_s1_df = train_s1[train_s1['entity_id'].isin(train_ids)].copy()
     val_s1_df = train_s1[train_s1['entity_id'].isin(val_ids)].copy()
 
-    target_df = pd.concat([train_s2, train_s3], ignore_index=True)
-    print(f"Target pool: {len(target_df):,}")
-
     # === BLOCKING ===
     print("\n" + "="*80)
     print("BLOCKING - TRAIN")
     print("="*80)
-    train_candidates = generate_candidates_multi_pass(train_s1_df, train_s2, train_s3, verbose=True)
+    train_candidates = generate_candidates_multi_pass(
+        train_s1_df, train_s2, train_s3, verbose=True,
+        target_chunk_size=100_000, max_candidates_per_entity=2_000
+    )
     train_gt_dict = {k: v for k, v in gt_dict.items() if k in train_ids}
     train_recall = compute_blocking_recall(train_candidates, train_gt_dict)
     print(f"\nBlocking recall (train): macro={train_recall['macro']:.4f}, micro={train_recall['micro']:.4f}")
@@ -143,10 +160,30 @@ def main():
     print("\n" + "="*80)
     print("BLOCKING - VAL")
     print("="*80)
-    val_candidates = generate_candidates_multi_pass(val_s1_df, train_s2, train_s3, verbose=True)
+    val_candidates = generate_candidates_multi_pass(
+        val_s1_df, train_s2, train_s3, verbose=True,
+        target_chunk_size=100_000, max_candidates_per_entity=2_000
+    )
     val_gt_dict = {k: v for k, v in gt_dict.items() if k in val_ids}
     val_recall = compute_blocking_recall(val_candidates, val_gt_dict)
     print(f"\nBlocking recall (val): macro={val_recall['macro']:.4f}, micro={val_recall['micro']:.4f}")
+
+    # Keep only target rows that survived blocking.  The previous full
+    # S2+S3 concat duplicated the multi-million-row target pool in memory.
+    needed_target_ids = {
+        target_id
+        for candidate_map in (train_candidates, val_candidates)
+        for values in candidate_map.values()
+        for target_id in values
+    }
+    target_df = pd.concat(
+        [
+            frame[frame['entity_id'].isin(needed_target_ids)]
+            for frame in (train_s2, train_s3)
+        ],
+        ignore_index=True,
+    )
+    print(f"Target rows retained for features: {len(target_df):,}")
 
     # === FEATURE ENGINEERING ===
     print("\n" + "="*80)
@@ -204,8 +241,8 @@ def main():
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=10)
 
     # Save
-    os.makedirs('../../../models', exist_ok=True)
-    with open('../../../models/xgb_baseline.pkl', 'wb') as f:
+    os.makedirs(MODEL_ROOT, exist_ok=True)
+    with open(MODEL_ROOT / 'xgb_baseline.pkl', 'wb') as f:
         pickle.dump({'model': model, 'feature_cols': feature_cols}, f)
     print("\nModel saved")
 
@@ -245,7 +282,7 @@ def main():
             best_f05 = f05
             best_threshold = thresh
 
-    with open('../../../models/threshold.txt', 'w') as f:
+    with open(MODEL_ROOT / 'threshold.txt', 'w') as f:
         f.write(str(best_threshold))
 
     print(f"\n=== FINAL RESULTS ===")

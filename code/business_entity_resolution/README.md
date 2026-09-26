@@ -15,10 +15,10 @@ This solution tackles the business entity resolution problem using a two-stage p
 pip install -r requirements.txt
 ```
 
-### Create Baseline Submission
+### Create a Memory-Safe Baseline Submission
 ```bash
 cd scripts
-python ultra_fast_baseline.py
+python memory_efficient_submission_v3_ultra.py
 ```
 
 This generates:
@@ -50,6 +50,10 @@ python ../../student_resource/utils/validate_submission.py \
 - Conservative normalization to handle unseen countries (France in test but not train)
 - Union of multiple passes to maximize recall
 - Track candidates-per-entity as it directly affects ranking
+- Target records are scanned in bounded chunks; the blocker does not build a
+  target-side inverted index or concatenate S2 and S3. The fast training entry
+  point also caps each S1 candidate set at 2,000 records to keep the
+  training/validation feature matrices bounded on multi-million-row targets.
 
 ### Stage 2: Matching
 
@@ -109,12 +113,23 @@ code/business_entity_resolution/
 
 ## Reproducibility
 
-### Option 1: Rule-based Baseline (Fast)
+### Option 1: Memory-safe rule-based baseline
 ```bash
 cd scripts
-python ultra_fast_baseline.py
+python memory_efficient_submission_v3_ultra.py
 ```
-Runtime: ~15-20 minutes on the full test set
+This version streams Source 2 and Source 3 in chunks and writes one row for
+every Source 1 test entity. Runtime depends on disk speed and available CPU.
+
+### Option 1 (recommended): Disk-backed streaming submission
+```bash
+python scripts/streaming_submission.py --rebuild-index
+```
+This builds a local SQLite index from the two target files once, then streams
+Source 1 in bounded chunks. It keeps only the current Source 1 chunk and the
+current candidate scores in memory, and writes both required output files
+incrementally. The index is stored at `output/targets.sqlite`; reuse it on
+subsequent runs without `--rebuild-index`.
 
 ### Option 2: ML Pipeline (Better performance, slower)
 ```bash

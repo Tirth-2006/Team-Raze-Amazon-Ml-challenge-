@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from scorer import macro_f05
 from normalization import normalize_business_name, normalize_address
 from rapidfuzz import fuzz
+from paths import DATASET_ROOT
 
 
 def load_ground_truth(train_path):
@@ -248,7 +249,7 @@ def resolve_conflicts(y_pred, s1_df, target_df):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--train_path', default='../../../student_resource/dataset/train',
+    parser.add_argument('--train_path', default=str(DATASET_ROOT / 'train'),
                        help='Path to training data directory')
     parser.add_argument('--split_ratio', type=float, default=0.8,
                        help='Train/val split ratio (default: 0.8)')

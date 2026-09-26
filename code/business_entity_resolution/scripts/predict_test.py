@@ -12,19 +12,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from blocking import generate_candidates_multi_pass
 from features import build_feature_matrix
+from paths import DATASET_ROOT, MODEL_ROOT, OUTPUT_ROOT
 
 
-def load_test_data(base_path='../../../student_resource/dataset'):
+def load_test_data(base_path=DATASET_ROOT):
     """Load test data"""
     print("Loading test data...")
-    test_s1 = pd.read_csv(f'{base_path}/test/test_source1.tsv', sep='\t')
-    test_s2 = pd.read_csv(f'{base_path}/test/test_source2.tsv', sep='\t')
-    test_s3 = pd.read_csv(f'{base_path}/test/test_source3.tsv', sep='\t')
+    test_s1 = pd.read_csv(base_path / 'test/test_source1.tsv', sep='\t')
+    test_s2 = pd.read_csv(base_path / 'test/test_source2.tsv', sep='\t')
+    test_s3 = pd.read_csv(base_path / 'test/test_source3.tsv', sep='\t')
     print(f"Loaded: S1={len(test_s1):,}, S2={len(test_s2):,}, S3={len(test_s3):,}")
     return test_s1, test_s2, test_s3
 
 
-def load_model(model_path='../../../models/xgb_baseline.pkl'):
+def load_model(model_path=MODEL_ROOT / 'xgb_baseline.pkl'):
     """Load trained model"""
     print(f"Loading model from {model_path}...")
     with open(model_path, 'rb') as f:
@@ -32,7 +33,7 @@ def load_model(model_path='../../../models/xgb_baseline.pkl'):
     return model_data['model'], model_data['feature_cols']
 
 
-def load_threshold(threshold_path='../../../models/threshold.txt'):
+def load_threshold(threshold_path=MODEL_ROOT / 'threshold.txt'):
     """Load threshold"""
     print(f"Loading threshold from {threshold_path}...")
     with open(threshold_path, 'r') as f:
@@ -121,7 +122,7 @@ def predict_test_set(
 def write_submission_files(
     candidates_dict,
     predictions_dict,
-    output_dir='../../../output'
+    output_dir=OUTPUT_ROOT
 ):
     """Write submission files"""
     print("\n" + "="*80)
