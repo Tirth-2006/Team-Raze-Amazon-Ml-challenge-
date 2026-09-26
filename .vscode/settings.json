@@ -1,0 +1,5 @@
+{
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/code/business_entity_resolution/src"
+    ]
+}
