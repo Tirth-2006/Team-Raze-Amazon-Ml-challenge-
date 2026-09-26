@@ -1,0 +1,29 @@
+================================================================================
+BASELINE TRAINING PIPELINE
+================================================================================
+Loading training data...
+Loaded: S1=2,206,821, S2=5,034,616, S3=5,285,603, GT=2,206,821
+
+Sampling 10% of training data...
+Sampled S1: 220,682, GT: 220,682
+
+Entity-level train/val split (test_size=0.2)...
+Train: 176,545, Val: 44,137
+Target pool: 10,320,219
+
+================================================================================
+BLOCKING - TRAIN
+================================================================================
+Blocking: 176,545 S1 entities vs 10,320,219 S2+S3 targets
+
+Pass 1: Name prefix (4 chars) + country
+Traceback (most recent call last):
+  File "C:\Users\TIRTH\OneDrive\Desktop\team Raze\code\business_entity_resolution\scripts\train_baseline_fast.py", line 262, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\TIRTH\OneDrive\Desktop\team Raze\code\business_entity_resolution\scripts\train_baseline_fast.py", line 138, in main
+    train_candidates = generate_candidates_multi_pass(train_s1_df, train_s2, train_s3, verbose=True)
+  File "C:\Users\TIRTH\OneDrive\Desktop\team Raze\code\business_entity_resolution\scripts\..\src\blocking.py", line 122, in generate_candidates_multi_pass
+    candidates[s1_id].update(target_index[key])
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+MemoryError
