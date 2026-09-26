@@ -6,6 +6,7 @@ small chunks. No full S2+S3 dataframe or all-results dictionary is retained.
 import argparse
 import csv
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -27,9 +28,29 @@ def add_features(frame):
         frame[field] = frame[field].fillna("").astype(str)
     frame["name_norm"] = frame["business_name"].map(normalize_business_name)
     frame["addr_norm"] = frame["business_address"].map(normalize_address)
-    frame["name_prefix"] = frame["name_norm"].str[:4]
-    frame["addr_num"] = frame["addr_norm"].str.extract(r"(\d+)", expand=False).fillna("")
+    frame["name_first"] = frame["name_norm"].map(first_name_token)
+    frame["name_top3"] = frame["name_norm"].map(top_name_tokens)
+    frame["addr_comp"] = frame["addr_norm"].map(address_composite_key)
     return frame
+
+
+def first_name_token(value):
+    return next((token for token in value.split() if len(token) >= 3), "")
+
+
+def top_name_tokens(value):
+    tokens = sorted((token for token in value.split() if len(token) >= 3),
+                    key=lambda token: (-len(token), token))[:3]
+    return "|".join(sorted(tokens))
+
+
+def address_composite_key(value):
+    numbers = re.findall(r"\d+", value)
+    tokens = [token for token in value.split()
+              if len(token) >= 3 and not token.isdigit()]
+    if numbers and tokens:
+        return f"{numbers[0]}_{tokens[0]}"
+    return ""
 
 
 def build_index(db_path, source_paths, chunksize):
@@ -43,11 +64,12 @@ def build_index(db_path, source_paths, chunksize):
             entity_id TEXT PRIMARY KEY, business_name TEXT NOT NULL,
             business_address TEXT NOT NULL, country TEXT NOT NULL,
             name_norm TEXT NOT NULL, addr_norm TEXT NOT NULL,
-            name_prefix TEXT NOT NULL, addr_num TEXT NOT NULL
+            name_first TEXT NOT NULL, name_top3 TEXT NOT NULL,
+            addr_comp TEXT NOT NULL
         )"""
     )
     insert_sql = (
-        "INSERT INTO targets VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO targets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     for source_path in source_paths:
         print(f"Indexing {source_path.name}...")
@@ -58,45 +80,81 @@ def build_index(db_path, source_paths, chunksize):
                 prepared.itertuples(index=False, name=None),
             )
             connection.commit()
-    connection.execute("CREATE INDEX idx_targets_prefix ON targets(country, name_prefix)")
-    connection.execute("CREATE INDEX idx_targets_num ON targets(country, addr_num)")
+    connection.execute("CREATE INDEX idx_targets_name_first ON targets(country, name_first)")
+    connection.execute("CREATE INDEX idx_targets_name_top3 ON targets(country, name_top3)")
+    connection.execute("CREATE INDEX idx_targets_addr_comp ON targets(country, addr_comp)")
     connection.commit()
     connection.close()
 
 
+def ensure_index_schema(connection):
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(targets)")}
+    required = {"name_first", "name_top3", "addr_comp"}
+    if not required.issubset(columns):
+        raise RuntimeError(
+            "Existing SQLite index uses an obsolete schema. "
+            "Rerun with --rebuild-index to build composite blocking keys."
+        )
+
+
 def score_chunk(connection, chunk, max_candidates, name_threshold, address_threshold):
-    """Fetch and score all candidates for one Source 1 chunk in one SQL query."""
+    """Fetch and score all candidates for one Source 1 chunk.
+
+    Composite blocking keys are queried in three indexed joins. The Python
+    dictionary removes duplicates when a target matches multiple passes.
+    """
     prepared = add_features(chunk)
     connection.execute("DROP TABLE IF EXISTS source_chunk")
     connection.execute(
         """CREATE TEMP TABLE source_chunk (
             entity_id TEXT PRIMARY KEY, country TEXT, name_norm TEXT,
-            addr_norm TEXT, name_prefix TEXT, addr_num TEXT
+            addr_norm TEXT, name_first TEXT, name_top3 TEXT, addr_comp TEXT
         )"""
     )
     connection.executemany(
-        "INSERT INTO source_chunk VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO source_chunk VALUES (?, ?, ?, ?, ?, ?, ?)",
         prepared[["entity_id", "country", "name_norm", "addr_norm",
-                   "name_prefix", "addr_num"]].itertuples(index=False, name=None),
+                   "name_first", "name_top3", "addr_comp"]].itertuples(index=False, name=None),
     )
     rows = connection.execute(
         """SELECT s.entity_id, s.name_norm, s.addr_norm,
                   t.entity_id, t.name_norm, t.addr_norm
-           FROM source_chunk s
-           JOIN targets t ON t.country = s.country
-             AND (t.name_prefix = s.name_prefix
-                  OR (s.addr_num <> '' AND t.addr_num = s.addr_num))"""
+           FROM source_chunk AS s
+           JOIN targets AS t INDEXED BY idx_targets_name_first
+             ON t.country = s.country AND s.name_first <> ''
+            AND t.name_first = s.name_first
+           UNION ALL
+           SELECT s.entity_id, s.name_norm, s.addr_norm,
+                  t.entity_id, t.name_norm, t.addr_norm
+           FROM source_chunk AS s
+           JOIN targets AS t INDEXED BY idx_targets_name_top3
+             ON t.country = s.country AND s.name_top3 <> ''
+            AND t.name_top3 = s.name_top3
+           UNION ALL
+           SELECT s.entity_id, s.name_norm, s.addr_norm,
+                  t.entity_id, t.name_norm, t.addr_norm
+           FROM source_chunk AS s
+           JOIN targets AS t INDEXED BY idx_targets_addr_comp
+             ON t.country = s.country AND s.addr_comp <> ''
+            AND t.addr_comp = s.addr_comp"""
     )
     scored = {}
     for source_id, source_name, source_addr, target_id, target_name, target_addr in rows:
         name_score = fuzz.ratio(source_name, target_name)
         addr_score = fuzz.ratio(source_addr, target_addr)
-        scored.setdefault(source_id, []).append(
-            (0.6 * name_score + 0.4 * addr_score, target_id, name_score, addr_score)
+        score = (
+            0.6 * name_score + 0.4 * addr_score,
+            target_id,
+            name_score,
+            addr_score,
         )
+        by_target = scored.setdefault(source_id, {})
+        previous = by_target.get(target_id)
+        if previous is None or score > previous:
+            by_target[target_id] = score
     result = {}
     for source_id in prepared["entity_id"]:
-        ranked = sorted(scored.get(source_id, ()), reverse=True)[:max_candidates]
+        ranked = sorted(scored.get(source_id, {}).values(), reverse=True)[:max_candidates]
         result[source_id] = (
             {item[1] for item in ranked},
             {
@@ -116,6 +174,7 @@ def run(args):
             args.target_chunk_size,
         )
     connection = sqlite3.connect(args.index)
+    ensure_index_schema(connection)
     matching_path = args.output_dir / "matching_results.tsv"
     candidate_path = args.output_dir / "candidate_pairs.tsv"
     with (

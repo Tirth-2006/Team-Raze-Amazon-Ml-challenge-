@@ -131,7 +131,9 @@ current candidate scores in memory, and writes both required output files
 incrementally. The candidates are ranked and capped immediately before the
 matching thresholds are applied, so `candidate_pairs.tsv` is the exact final
 candidate set fed to the matcher. The index is stored at
-`output/targets.sqlite`; reuse it on subsequent runs without `--rebuild-index`.
+`output/targets.sqlite`. The index uses composite blocking keys: significant
+name tokens and address number plus address token. Reuse it on subsequent runs
+without `--rebuild-index`; an older index must be rebuilt once.
 
 ### Option 2: ML Pipeline (Better performance, slower)
 ```bash
