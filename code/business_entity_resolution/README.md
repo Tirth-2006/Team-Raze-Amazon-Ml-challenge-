@@ -128,8 +128,10 @@ python scripts/streaming_submission.py --rebuild-index
 This builds a local SQLite index from the two target files once, then streams
 Source 1 in bounded chunks. It keeps only the current Source 1 chunk and the
 current candidate scores in memory, and writes both required output files
-incrementally. The index is stored at `output/targets.sqlite`; reuse it on
-subsequent runs without `--rebuild-index`.
+incrementally. The candidates are ranked and capped immediately before the
+matching thresholds are applied, so `candidate_pairs.tsv` is the exact final
+candidate set fed to the matcher. The index is stored at
+`output/targets.sqlite`; reuse it on subsequent runs without `--rebuild-index`.
 
 ### Option 2: ML Pipeline (Better performance, slower)
 ```bash
