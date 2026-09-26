@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-from rapidfuzz import fuzz
+from rapidfuzz import fuzz, process
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from normalization import normalize_address, normalize_business_name
@@ -138,23 +138,38 @@ def score_chunk(connection, chunk, max_candidates, name_threshold, address_thres
              ON t.country = s.country AND s.addr_comp <> ''
             AND t.addr_comp = s.addr_comp"""
     )
-    scored = {}
+    candidates = {}
     for source_id, source_name, source_addr, target_id, target_name, target_addr in rows:
-        name_score = fuzz.ratio(source_name, target_name)
-        addr_score = fuzz.ratio(source_addr, target_addr)
-        score = (
-            0.6 * name_score + 0.4 * addr_score,
-            target_id,
-            name_score,
-            addr_score,
+        by_target = candidates.setdefault(source_id, {})
+        by_target.setdefault(target_id, (target_name, target_addr))
+
+    shortlist_size = max_candidates * 5
+    scored = {}
+    for source_id, target_data in candidates.items():
+        source_row = prepared.loc[prepared["entity_id"].eq(source_id)].iloc[0]
+        target_ids = list(target_data)
+        target_names = [target_data[target_id][0] for target_id in target_ids]
+        name_hits = process.extract(
+            source_row["name_norm"],
+            target_names,
+            scorer=fuzz.ratio,
+            limit=shortlist_size,
         )
-        by_target = scored.setdefault(source_id, {})
-        previous = by_target.get(target_id)
-        if previous is None or score > previous:
-            by_target[target_id] = score
+        ranked = []
+        for _, name_score, position in name_hits:
+            target_id = target_ids[position]
+            target_addr = target_data[target_id][1]
+            addr_score = fuzz.ratio(source_row["addr_norm"], target_addr)
+            ranked.append((
+                0.6 * name_score + 0.4 * addr_score,
+                target_id,
+                name_score,
+                addr_score,
+            ))
+        scored[source_id] = ranked
     result = {}
     for source_id in prepared["entity_id"]:
-        ranked = sorted(scored.get(source_id, {}).values(), reverse=True)[:max_candidates]
+        ranked = sorted(scored.get(source_id, ()), reverse=True)[:max_candidates]
         result[source_id] = (
             {item[1] for item in ranked},
             {
