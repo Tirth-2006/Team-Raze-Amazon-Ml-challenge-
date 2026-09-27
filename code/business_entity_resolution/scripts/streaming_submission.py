@@ -222,13 +222,15 @@ def run(args):
         source1 = args.test_dir / "test_source1.tsv"
         skipped = 0
         for chunk in pd.read_csv(source1, sep="\t", usecols=FIELDS, chunksize=args.s1_chunk_size):
-            if skipped < processed:
-                remaining = processed - skipped
+            if skipped < args.start_row:
+                remaining = args.start_row - skipped
                 if len(chunk) <= remaining:
                     skipped += len(chunk)
                     continue
                 chunk = chunk.iloc[remaining:].copy()
-                skipped = processed
+                skipped = args.start_row
+            if args.end_row is not None and skipped + len(chunk) > args.end_row:
+                chunk = chunk.iloc[:args.end_row - skipped].copy()
             chunk_results = score_chunk(
                 connection, chunk, args.max_candidates,
                 args.name_threshold, args.address_threshold,
@@ -240,7 +242,10 @@ def run(args):
             matching_file.flush()
             candidate_file.flush()
             processed += len(chunk)
-            print(f"Processed {processed:,} Source 1 entities")
+            skipped += len(chunk)
+            print(f"Processed range rows {args.start_row:,}-{skipped:,}")
+            if args.end_row is not None and skipped >= args.end_row:
+                break
     connection.close()
 
 
@@ -253,6 +258,8 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--target-chunk-size", type=int, default=25_000)
     parser.add_argument("--s1-chunk-size", type=int, default=1_000)
+    parser.add_argument("--start-row", type=int, default=0)
+    parser.add_argument("--end-row", type=int)
     parser.add_argument("--max-candidates", type=int, default=200)
     parser.add_argument("--name-threshold", type=int, default=85)
     parser.add_argument("--address-threshold", type=int, default=70)
