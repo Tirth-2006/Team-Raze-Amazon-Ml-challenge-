@@ -83,6 +83,7 @@ def build_index(db_path, source_paths, chunksize):
     connection.execute("CREATE INDEX idx_targets_name_first ON targets(country, name_first)")
     connection.execute("CREATE INDEX idx_targets_name_top3 ON targets(country, name_top3)")
     connection.execute("CREATE INDEX idx_targets_addr_comp ON targets(country, addr_comp)")
+    connection.execute("CREATE INDEX idx_targets_name_norm ON targets(country, name_norm)")
     connection.commit()
     connection.close()
 
@@ -95,6 +96,10 @@ def ensure_index_schema(connection):
             "Existing SQLite index uses an obsolete schema. "
             "Rerun with --rebuild-index to build composite blocking keys."
         )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_targets_name_norm ON targets(country, name_norm)"
+    )
+    connection.commit()
 
 
 def score_chunk(connection, chunk, max_candidates, name_threshold, address_threshold):
@@ -130,6 +135,13 @@ def score_chunk(connection, chunk, max_candidates, name_threshold, address_thres
            JOIN targets AS t INDEXED BY idx_targets_addr_comp
              ON t.country = s.country AND s.addr_comp <> ''
             AND t.addr_comp = s.addr_comp"""
+        """ UNION ALL
+           SELECT s.entity_id, s.name_norm, s.addr_norm,
+                  t.entity_id, t.name_norm, t.addr_norm
+           FROM source_chunk AS s
+           JOIN targets AS t INDEXED BY idx_targets_name_norm
+             ON t.country = s.country AND s.name_norm <> ''
+            AND t.name_norm = s.name_norm"""
     )
     candidates = {}
     for source_id, source_name, source_addr, target_id, target_name, target_addr in rows:
